@@ -1,6 +1,9 @@
 import json
 import sys
 
+PLANE_UNLOAD_TIME = 20
+TRUCK_LOAD_TIME = 5
+
 # Load the json files for use
 def load_data(meta_path, aircraft_path, trucks_path):
     with open(meta_path, 'r') as f:
@@ -91,7 +94,7 @@ def define_domains(meta_data, aircraft_data, truck_data):
 
 #     return hangar_schedule
 
-def parse_variable(variable):
+def parse_variable(variable, problem_data):
     parts = variable.split("_")
     info = {"plane": None, "truck": None, "hangar": None, "forklift": None, "type": None, "index": None}
 
@@ -144,17 +147,13 @@ def same_vehicle(variable1, variable2):
 #idea is the checker will take a variable such as Plane1_Hangar-Arrival_Time, a value from that vars domain so like one of the possible times 800
 #the assigmnets which are the approved actions so far in the schdule which will compare for conflicts with those, and the problem data so like the general data from JSON
 def meets_constraints(variable, value, assignments, problem_data):
-    info = parse_variable(variable)
+    info = parse_variable(variable, problem_data)
 
+    # Cannot arrived before arrival time
+    # Cannot arrive after already arrived
+    # Cannot arrive at hangar with plane in it
     if info['type'] == 'Arrival':
-        # Ensure no prior arrival of the same vehicle
-        for assignment in assignment.keys():
-            assignment_info = parse_variable(assignment)
-            
-            if assignment_info['type'] == 'Arrival' and same_vehicle(info, assignment_info):
-                return False
-            
-        # Ensure no arrival before designated arrival time
+         # Ensure no arrival before designated arrival time
         if info.get('truck'):
             original_arrival_time = problem_data['trucks'].get(info.get('truck'))
         else:
@@ -162,7 +161,39 @@ def meets_constraints(variable, value, assignments, problem_data):
 
         if value < original_arrival_time:
             return False
+        
+        plane_arrivals = plane_departures = 0
+        truck_arrivals = truck_departures = 0
 
+        # Ensure no prior arrival of the same vehicle
+        for assignment, time in assignment.items():
+            assignment_info = parse_variable(assignment, problem_data)
+            
+            if assignment_info['type'] == 'Arrival':
+                if same_vehicle(info, assignment_info):
+                    return False
+                
+                if info['hangar'] == assignment_info['hangar']:
+                    if info.get('truck'):
+                        truck_arrivals += 1
+                    else:
+                        plane_arrivals += 1
+                        
+
+            if assignment_info['type'] == 'Departure' and info['hangar'] == assignment_info['hangar']:
+                if info.get('truck'):
+                    truck_departures += 1
+                else:
+                    plane_departures += 1
+
+        # If arrivals != departures, then there must be a plane/truck at the hangar already
+        if ((info.get('plane') and plane_arrivals != plane_departures) or
+            (info.get('truck') and truck_arrivals != truck_departures)):
+            return False
+
+
+    # Cannot depart before arriving
+    # Cannot depart with cargo
     if info['type'] == 'Departure':
         # Ensure arrival before departure and cargo fully unloaded if a plane departure
         # No check for prior departures as only one departure variable exists per vehicle
@@ -170,7 +201,7 @@ def meets_constraints(variable, value, assignments, problem_data):
         cargo_loaded = 0
 
         for assignment, time in assignments.items():
-            assignment_info = parse_variable(assignment)
+            assignment_info = parse_variable(assignment, problem_data)
 
             if not same_vehicle(info, assignment_info):
                 continue
@@ -183,12 +214,51 @@ def meets_constraints(variable, value, assignments, problem_data):
 
         if not valid_arrival or (info.get("plane") and cargo_loaded != problem_data['aircraft'][info['plane']]['Cargo']):
             return False
-        
-    
-    # Infor 
+
+    # Cannot load departed truck
+    # Cannot load loaded truck
+    # Cannot load with in-use forklift
+    # (TODO) Cannot load if no cargo at hangar
     if info['type'] == 'Load':
+        # If loading finishes after our time deadline
+        if value + TRUCK_LOAD_TIME > problem_data['Meta']['Stop Time']:
+            return False
+
+        valid_arrival = False
+
+        for assignment, time in assignments.items():
+            assignment_info = parse_variable(assignment, problem_data)
+
+            if assignment_info.get('forklift') and info['forklift'] == assignment_info['forklift']:
+                fork_finished_use = time + (PLANE_UNLOAD_TIME if assignment_info['type'] == 'Unload' else TRUCK_LOAD_TIME)
+                
+                # If forklift is in use during the time
+                # Essentially if it finishes after this previous forklift assignment started,
+                # but before it ended. May be possible to remove "value + TRUCK_LOAD_TIME > time"
+                # and force forklift assignments to be added in order.
+                # Not sure if that would improve efficiency or even work.
+                if value + TRUCK_LOAD_TIME > time and value < fork_finished_use:
+                    return False
+
+            if same_vehicle(info, assignment_info):
+                # If the truck has already departed or if its already been loaded, it cannot be loaded
+                if assignment_info['type'] in ['Departure', 'Load']:
+                    return False
+                
+                if assignment_info['type'] == 'Arrival':
+                    # If we are trying to load before the truck arrives
+                    if value < time:
+                        return False
+                    
+                    valid_arrival = True
+
+        if not valid_arrival:
+            return False
         
     if info['type'] == 'Unload':
+        # If unloading + loading is not feasible before time deadline
+        if value + PLANE_UNLOAD_TIME + TRUCK_LOAD_TIME > problem_data['Meta']['Stop Time']:
+            return False
 
     return True
 
