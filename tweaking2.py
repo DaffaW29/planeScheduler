@@ -1,8 +1,10 @@
 import json
 import sys
 
-PLANE_UNLOAD_TIME = 20
-TRUCK_LOAD_TIME = 5
+TIME_STEP = 5
+
+PLANE_UNLOAD_TIME = TIME_STEP*4
+TRUCK_LOAD_TIME = TIME_STEP*1
 
 # Load the json files for use
 def load_data(meta_path, aircraft_path, trucks_path):
@@ -52,12 +54,12 @@ def define_domains(meta_data, aircraft_data, truck_data):
 
     while current_time <= stop_time:
         time_schedule.append(current_time)
-        current_time += 5
+        current_time += TIME_STEP
 
     all_vars = define_variables(meta_data, aircraft_data, truck_data)
 
     for var in all_vars:
-        domains[var] = time_schedule
+        domains[var] = time_schedule + [-1]
 
     return domains
 
@@ -147,6 +149,10 @@ def same_vehicle(variable1, variable2):
 #idea is the checker will take a variable such as Plane1_Hangar-Arrival_Time, a value from that vars domain so like one of the possible times 800
 #the assigmnets which are the approved actions so far in the schdule which will compare for conflicts with those, and the problem data so like the general data from JSON
 def meets_constraints(variable, value, assignments, problem_data):
+    # A -1 value implies that this variable is intended to be unassigned
+    if value == -1:
+        return True
+
     info = parse_variable(variable, problem_data)
 
     # Cannot arrived before arrival time
@@ -167,6 +173,8 @@ def meets_constraints(variable, value, assignments, problem_data):
 
         # Ensure no prior arrival of the same vehicle
         for assignment, time in assignment.items():
+            if time == -1: continue
+
             assignment_info = parse_variable(assignment, problem_data)
             
             if assignment_info['type'] == 'Arrival':
@@ -201,6 +209,8 @@ def meets_constraints(variable, value, assignments, problem_data):
         cargo_loaded = 0
 
         for assignment, time in assignments.items():
+            if time == -1: continue
+
             assignment_info = parse_variable(assignment, problem_data)
 
             if not same_vehicle(info, assignment_info):
@@ -218,41 +228,69 @@ def meets_constraints(variable, value, assignments, problem_data):
     # Cannot load departed truck
     # Cannot load loaded truck
     # Cannot load with in-use forklift
-    # (TODO) Cannot load if no cargo at hangar
+    # Cannot load if no cargo at hangar
     if info['type'] == 'Load':
         # If loading finishes after our time deadline
         if value + TRUCK_LOAD_TIME > problem_data['Meta']['Stop Time']:
             return False
 
         valid_arrival = False
+        truck_hangar = None
+        vehicle_hangars = {}
+        hangar_cargo = {}
 
         for assignment, time in assignments.items():
+            if time == -1:
+                continue
+
             assignment_info = parse_variable(assignment, problem_data)
 
+            # Forklift constraints
             if assignment_info.get('forklift') and info['forklift'] == assignment_info['forklift']:
-                fork_finished_use = time + (PLANE_UNLOAD_TIME if assignment_info['type'] == 'Unload' else TRUCK_LOAD_TIME)
-                
-                # If forklift is in use during the time
-                # Essentially if it finishes after this previous forklift assignment started,
-                # but before it ended. May be possible to remove "value + TRUCK_LOAD_TIME > time"
-                # and force forklift assignments to be added in order.
-                # Not sure if that would improve efficiency or even work.
+                fork_finished_use = time + (
+                    PLANE_UNLOAD_TIME if assignment_info['type'] == 'Unload' else TRUCK_LOAD_TIME
+                )
+
                 if value + TRUCK_LOAD_TIME > time and value < fork_finished_use:
                     return False
 
+            # Record which hangar each vehicle occupies at arrival
+            if assignment_info['type'] == 'Arrival':
+                hangar = assignment_info.get('hangar')
+                vehicle = assignment_info.get('truck') or assignment_info.get('plane')
+
+                if hangar:
+                    vehicle_hangars[vehicle] = hangar
+                    if hangar not in hangar_cargo:
+                        hangar_cargo[hangar] = 0
+            # Adjust hangar cargo counts as loads/unloads occur
+            elif assignment_info['type'] == 'Load':
+                truck = assignment_info.get('truck')
+                hangar = vehicle_hangars.get(truck)
+
+                if hangar is not None:
+                    hangar_cargo[hangar] = hangar_cargo.get(hangar, 0) - 1
+            elif assignment_info['type'] == 'Unload':
+                plane = assignment_info.get('plane')
+                hangar = vehicle_hangars.get(plane)
+
+                if hangar is not None:
+                    hangar_cargo[hangar] = hangar_cargo.get(hangar, 0) + 1
+
+            # Truck-specific constraints
             if same_vehicle(info, assignment_info):
-                # If the truck has already departed or if its already been loaded, it cannot be loaded
                 if assignment_info['type'] in ['Departure', 'Load']:
                     return False
-                
+
                 if assignment_info['type'] == 'Arrival':
-                    # If we are trying to load before the truck arrives
                     if value < time:
                         return False
-                    
-                    valid_arrival = True
 
-        if not valid_arrival:
+                    valid_arrival = True
+                    truck_hangar = assignment_info['hangar']
+
+        # Ensure truck has arrived and there’s at least one cargo unit available at its hangar
+        if not valid_arrival or hangar_cargo.get(truck_hangar, 0) < 1:
             return False
         
     if info['type'] == 'Unload':
@@ -264,41 +302,86 @@ def meets_constraints(variable, value, assignments, problem_data):
 
 # The backtracking solver
 #Now that i think ive got a decent constraint checker, we create the csp backtracker 
-def solve_csp(assignments, variables, domains, problem_data):
-    # Base case: All variables have been assigned.
-    # if not variables:
-    #     return assignments
-    loaded = set()
+# def solve_csp(assignments, variables, domains, problem_data):
+#     # Base case: All variables have been assigned.
+#     # if not variables:
+#     #     return assignments
+#     loaded = set()
 
+#     for assignment in assignments.keys():
+#         if assignment.startswith('Load_Pallet_'):
+#             loaded.add(assignment.split('_')[2])
+
+#     if len(loaded) == sum(data['Cargo'] for data in problem_data['aircraft'].values()):
+#         return assignments
+
+#     # pick the first unassigned var to use
+#     variable = variables[0]
+
+#     # Iterate through the domain of the selected variable. (So like if its Plane1_Hangar youll iterate between hangar1 hangar 2 etc)
+#     for value in domains[variable]:
+#         # check constraints
+#         if meets_constraints(variable, value, assignments, problem_data):
+#             # If consistent, prematurely add the assignment and do recursion
+#             assignments[variable] = value
+#             result = solve_csp(assignments, variables[1:], domains, problem_data)
+#             # print("CSP RESULTS")
+#             # print(assignments)
+
+#             # If the recursive call finds a solution return
+#             if result is not None:
+#                 return result
+
+#             # If the recursive call fails go back and delete the premature assignment
+#             del assignments[variable]
+
+    
+#     # If the loop finishes without finding a solution, return None.
+#     return None
+
+def termination_condition(assignments, problem_data):
+    # Terminate when all aircraft cargo loads have been completed
+    loaded = set()
     for assignment in assignments.keys():
         if assignment.startswith('Load_Pallet_'):
             loaded.add(assignment.split('_')[2])
 
-    if len(loaded) == sum(data['Cargo'] for data in problem_data['aircraft'].values()):
+    total_cargo = sum(data['Cargo'] for data in problem_data['aircraft'].values())
+    return len(loaded) == total_cargo
+
+def solve_csp(assignments, variables, domains, problem_data, latest_time=None):
+    # Initialize latest_time on the first call
+    if latest_time is None:
+        latest_time = problem_data['meta']['Start Time']
+
+    # Base case: stop if all cargo loads are done
+    if termination_condition(assignments, problem_data):
         return assignments
 
-    # pick the first unassigned var to use
+    # If no more variables, return None
+    if not variables:
+        return None
+
     variable = variables[0]
+    domain = domains[variable]
 
-    # Iterate through the domain of the selected variable. (So like if its Plane1_Hangar youll iterate between hangar1 hangar 2 etc)
-    for value in domains[variable]:
-        # check constraints
+    # Iterate through the domain values in order
+    for value in domain:
+        # Don't assign earlier times but allow for unassigned value.
+        if value != -1 and value < latest_time:
+            continue
+
+        # Check constraints
         if meets_constraints(variable, value, assignments, problem_data):
-            # If consistent, prematurely add the assignment and do recursion
+            new_latest_time = value if value != -1 and value > latest_time else latest_time
             assignments[variable] = value
-            result = solve_csp(assignments, variables[1:], domains, problem_data)
-            # print("CSP RESULTS")
-            # print(assignments)
+            result = solve_csp(assignments, variables[1:], domains, problem_data, new_latest_time)
 
-            # If the recursive call finds a solution return
             if result is not None:
                 return result
 
-            # If the recursive call fails go back and delete the premature assignment
             del assignments[variable]
 
-    
-    # If the loop finishes without finding a solution, return None.
     return None
 
 
