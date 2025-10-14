@@ -164,7 +164,7 @@ def meets_constraints(variable, value, assignments, problem_data):
             return False
 
     if info['type'] == 'Departure':
-        # Ensure arrival before departure and cargo fully unloaded
+        # Ensure arrival before departure and cargo fully unloaded if a plane departure
         # No check for prior departures as only one departure variable exists per vehicle
         valid_arrival = False
         cargo_loaded = 0
@@ -181,7 +181,7 @@ def meets_constraints(variable, value, assignments, problem_data):
             if assignment_info['type'] == 'Unload':
                 cargo_loaded += 1
 
-        if not valid_arrival or (cargo_loaded > 0 and cargo_loaded != problem_data['aircraft'][info['plane']]['Cargo']):
+        if not valid_arrival or (info.get("plane") and cargo_loaded != problem_data['aircraft'][info['plane']]['Cargo']):
             return False
         
     
