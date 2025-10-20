@@ -1,10 +1,14 @@
 import json
 import sys
+from itertools import product
+
 
 TIME_STEP = 5
 
 PLANE_UNLOAD_TIME = TIME_STEP*4
 TRUCK_LOAD_TIME = TIME_STEP*1
+PLANE_UNLOAD_DURATION = 20
+TRUCK_LOAD_DURATION = 5
 
 # Load the json files for use
 def load_data(meta_path, aircraft_path, trucks_path):
@@ -16,51 +20,98 @@ def load_data(meta_path, aircraft_path, trucks_path):
         truck_data = json.load(f)
     return meta_data, aircraft_data, truck_data
 
-# Defining variables
+#Time managemenr helpers 
+def increment_time(current):
+    hours = current // 100
+    minutes = current % 100
+
+    minutes += 5
+    if minutes >= 60:
+        hours += 1
+        minutes -= 60
+
+    return hours * 100 + minutes
+
 def define_variables(meta_data, aircraft_data, truck_data):
+    #Defines variables based on key decisions for each plane and pallet.
     variables = []
-    forklifts = meta_data['Forklift']
-    
-    # Plane and truck hangar and arrival time variables
+    pallets = []
+    for plane, details in aircraft_data.items():
+        for i in range(details['Cargo']):
+            pallets.append(f"{plane}_Pallet_{i}")
+            
+    # Plane arrival at hangar
     for plane in aircraft_data:
-        variables.append(f'{plane}_Departure_Time')
-
-        for hangar in meta_data['Hangars']:
-            variables.append(f'{plane}_{hangar}_Arrival_Time')
-
-        for i in range(aircraft_data[plane]['Cargo']):
-            for fork in forklifts:
-                variables.append(f'{plane}_Unload_{i}_Time_{fork}')
-
+        variables.append(f"Plane_Arrival_{plane}")
+        
+    # Truck arrival at a hangar
     for truck in truck_data:
-        variables.append(f'{truck}_Departure_Time')
+        variables.append(f"Truck_Hangar_Arrival_{truck}")
+        
+	#everything done by pallet
+    # For each individual pallet, we have three things to deyermin
+    for pallet_id in pallets:
+        # WHICH truck will carry pallet
+        variables.append(f"Pallet_Assignment_{pallet_id}")
 
-        for hangar in meta_data['Hangars']:
-            variables.append(f'{truck}_{hangar}_Arrival_Time')
+        #WHO UNLOADS the pallet and WHEN
+        variables.append(f"Unload_Task_{pallet_id}")
 
-        for fork in forklifts:
-            variables.append(f'{truck}_Load_Time_{fork}')
+        # WHO LOADS this pallet and WHEN
+        variables.append(f"Load_Task_{pallet_id}")
         
     return variables
-
-# Defining domains for these variables
+    
 def define_domains(meta_data, aircraft_data, truck_data):
     domains = {}
     
     start_time = meta_data['Start Time']
     stop_time = meta_data['Stop Time']
-    current_time = start_time
     time_schedule = []
-
+    current_time = start_time
+    #account for time
     while current_time <= stop_time:
         time_schedule.append(current_time)
-        current_time += TIME_STEP
+        current_time = increment_time(current_time)
 
-    all_vars = define_variables(meta_data, aircraft_data, truck_data)
+    hangars = meta_data['Hangars']
+    forklifts = meta_data['Forklifts']
+    truck_names = list(truck_data.keys())
+    pallets = []
+    for plane, details in aircraft_data.items():
+        for i in range(details['Cargo']):
+            pallets.append(f"{plane}_Pallet_{i}")
 
-    for var in all_vars:
-        domains[var] = time_schedule + [-1]
 
+    # Domain for Plane Arrival variables: (Hangar, Time)
+    plane_arrival_domain = list(product(hangars, time_schedule))
+    for plane in aircraft_data:
+        var_name = f"Plane_Arrival_{plane}"
+        #plane can't arrive at a hangar before it arrives at the terminal
+        min_arrival_time = aircraft_data[plane]['Time']
+        domains[var_name] = [
+            (h, t) for h, t in plane_arrival_domain if t >= min_arrival_time
+        ]
+        
+    # Domain for Truck Hangar Arrival: (Hangar, Time)
+    truck_arrival_domain = list(product(hangars, time_schedule))
+    for truck in truck_names:
+        min_time = truck_data[truck]
+        domains[f"Truck_Hangar_Arrival_{truck}"] = [(h, t) for h, t in truck_arrival_domain if t >= min_time]
+
+    # Pallet Assignment variables: A list of truck names
+    pallet_assignment_domain = truck_names
+    
+    #Unload/Load Task variables Forklift and Time
+    task_domain = list(product(forklifts, time_schedule))
+
+    # Assign domains to each pallet variable
+    for pallet_id in pallets:
+        domains[f"Pallet_Assignment_{pallet_id}"] = pallet_assignment_domain
+        
+        domains[f"Unload_Task_{pallet_id}"] = task_domain
+        domains[f"Load_Task_{pallet_id}"] = task_domain
+        
     return domains
 
 # Helper functions for the constraint checker
@@ -96,207 +147,243 @@ def define_domains(meta_data, aircraft_data, truck_data):
 
 #     return hangar_schedule
 
-def parse_variable(variable, problem_data):
-    parts = variable.split("_")
-    info = {"plane": None, "truck": None, "hangar": None, "forklift": None, "type": None, "index": None}
+# def parse_variable(variable, problem_data):
+#     parts = variable.split("_")
+#     info = {"plane": None, "truck": None, "hangar": None, "forklift": None, "type": None, "index": None}
 
-    if "Unload" in parts:
-        # plane unload variable
-        info["type"] = "Unload"
-        info["plane"] = parts[0]
-        info["index"] = parts[2]  # numeric pallet index
-        info["forklift"] = parts[-1]
-    elif "Load" in parts:
-        # truck load variable
-        info["type"] = "Load"
-        info["truck"] = parts[0]
-        info["forklift"] = parts[-1]
-    elif "Arrival" in parts:
-        # plane or truck arrival variable
-        info["type"] = "Arrival"
-        if parts[0] in problem_data["aircraft"]:
-            info["plane"] = parts[0]
-        else:
-            info["truck"] = parts[0]
-        info["hangar"] = parts[1]
-    elif "Departure" in parts:
-        # plane or truck departure variable
-        info["type"] = "Departure"
-        if parts[0] in problem_data["aircraft"]:
-            info["plane"] = parts[0]
-        else:
-            info["truck"] = parts[0]
+#     if "Unload" in parts:
+#         # plane unload variable
+#         info["type"] = "Unload"
+#         info["plane"] = parts[0]
+#         info["index"] = parts[2]  # numeric pallet index
+#         info["forklift"] = parts[-1]
+#     elif "Load" in parts:
+#         # truck load variable
+#         info["type"] = "Load"
+#         info["truck"] = parts[0]
+#         info["forklift"] = parts[-1]
+#     elif "Arrival" in parts:
+#         # plane or truck arrival variable
+#         info["type"] = "Arrival"
+#         if parts[0] in problem_data["aircraft"]:
+#             info["plane"] = parts[0]
+#         else:
+#             info["truck"] = parts[0]
+#         info["hangar"] = parts[1]
+#     elif "Departure" in parts:
+#         # plane or truck departure variable
+#         info["type"] = "Departure"
+#         if parts[0] in problem_data["aircraft"]:
+#             info["plane"] = parts[0]
+#         else:
+#             info["truck"] = parts[0]
 
+#     return info
+
+def parse_variable(variable):
+    parts = variable.split('_')
+    info = {'type': parts[0] + '_' + parts[1]} # 'Plane_Arrival', 'Unload_Task', 'Load_Task', "Pallet_Assignment"
+    
+    if info['type'] == 'Plane_Arrival':
+        info['plane'] = parts[2]
+    elif info['type'] == 'Truck_Hangar': 
+        info['truck'] = parts[3]
+    elif info['type'] == 'Pallet_Assignment':
+        info['pallet_id'] = f"{parts[2]}_{parts[3]}_{parts[4]}"
+    elif info['type'] in ['Unload_Task', 'Load_Task']:
+        info['pallet_id'] = f"{parts[2]}_{parts[3]}_{parts[4]}"
+        info['plane'] = parts[2] 
+        
     return info
 
 def same_vehicle(variable1, variable2):
     return (variable1.get('truck') and variable1['truck'] == variable2['truck']) or (variable1.get('plane') and variable1['plane'] == variable2['plane'])
 
-# #Another helper function like hangar occupied but for forklifts
-# def get_occupied_forklift_intervals(assignments):
-#     forklift_schedule = {}
-#     for var, val in assignments.items():
-#         if 'Unload_Pallet_' in var or 'Load_Pallet_' in var:
-#             forklift, _hangar, start_time = val
-#             if forklift not in forklift_schedule:
-#                 forklift_schedule[forklift] = []
-#             end_time = start_time + (20 if 'Unload' in var else 5)
-#             forklift_schedule[forklift].append((start_time, end_time))
-#     return forklift_schedule
-
 # The constraint checker
 #Next is the constraint checker which will be extremely important as it will be pretty much called every time something is passed through the main alg
 #idea is the checker will take a variable such as Plane1_Hangar-Arrival_Time, a value from that vars domain so like one of the possible times 800
 #the assigmnets which are the approved actions so far in the schdule which will compare for conflicts with those, and the problem data so like the general data from JSON
+# Define durations as constants for clarity
+
 def meets_constraints(variable, value, assignments, problem_data):
-    # A -1 value implies that this variable is intended to be unassigned
-    if value == -1:
+   
+    
+    # If a variable is unassigned in the current branch, it's not a violation yet.
+    if value is None:
         return True
 
-    info = parse_variable(variable, problem_data)
+    info = parse_variable(variable)
+    stop_time = problem_data['meta']['Stop Time']
 
-    # Cannot arrived before arrival time
-    # Cannot arrive after already arrived
-    # Cannot arrive at hangar with plane in it
-    if info['type'] == 'Arrival':
-         # Ensure no arrival before designated arrival time
-        if info.get('truck'):
-            original_arrival_time = problem_data['trucks'].get(info.get('truck'))
-        else:
-            original_arrival_time = problem_data['aircraft'].get(info.get('plane'), {}).get('Time')
+    # C1: CONSTRAINTS FOR 'Plane_Arrival' VARIABLES
+    if info['type'] == 'Plane_Arrival':
+        assigned_hangar, assigned_time = value
 
-        if value < original_arrival_time:
-            return False
-        
-        plane_arrivals = plane_departures = 0
-        truck_arrivals = truck_departures = 0
-
-        # Ensure no prior arrival of the same vehicle
-        for assignment, time in assignment.items():
-            if time == -1: continue
-
-            assignment_info = parse_variable(assignment, problem_data)
+        # Rule: "Each terminal hangar can handle one aircraft at a time."
+        for other_var, other_val in assignments.items():
+            if other_val is None or other_var == variable:
+                continue
             
-            if assignment_info['type'] == 'Arrival':
-                if same_vehicle(info, assignment_info):
-                    return False
+            # Check against other assigned planes
+            if 'Plane_Arrival' in other_var:
+                other_info = parse_variable(other_var)
+                other_hangar, other_time = other_val
                 
-                if info['hangar'] == assignment_info['hangar']:
-                    if info.get('truck'):
-                        truck_arrivals += 1
-                    else:
-                        plane_arrivals += 1
-                        
+                if assigned_hangar == other_hangar:
+                    # To check for overlap, we need to know when the other plane DEPARTS.
+                    # A plane departs after its last pallet is unloaded.
+                    
+                    # Find all pallets for the other plane
+                    other_plane_pallets = [
+                        p_var for p_var in assignments if f"Unload_Task_{other_info['plane']}_Pallet" in p_var
+                    ]
+                    
+                    # Find the latest unload finish time for that plane's pallets
+                    other_departure_time = other_time
+                    for p_var in other_plane_pallets:
+                        p_val = assignments.get(p_var)
+                        if p_val:
+                            _forklift, unload_start = p_val
+                            unload_finish = unload_start + PLANE_UNLOAD_DURATION
+                            if unload_finish > other_departure_time:
+                                other_departure_time = unload_finish
+                    
+                    # The new plane can only arrive after the other plane departs.
+                    if assigned_time < other_departure_time:
+                        return False # Hangar conflict!
 
-            if assignment_info['type'] == 'Departure' and info['hangar'] == assignment_info['hangar']:
-                if info.get('truck'):
-                    truck_departures += 1
-                else:
-                    plane_departures += 1
-
-        # If arrivals != departures, then there must be a plane/truck at the hangar already
-        if ((info.get('plane') and plane_arrivals != plane_departures) or
-            (info.get('truck') and truck_arrivals != truck_departures)):
-            return False
-
-
-    # Cannot depart before arriving
-    # Cannot depart with cargo
-    if info['type'] == 'Departure':
-        # Ensure arrival before departure and cargo fully unloaded if a plane departure
-        # No check for prior departures as only one departure variable exists per vehicle
-        valid_arrival = False
-        cargo_loaded = 0
-
-        for assignment, time in assignments.items():
-            if time == -1: continue
-
-            assignment_info = parse_variable(assignment, problem_data)
-
-            if not same_vehicle(info, assignment_info):
+    # CONSTRAINTS FOR 'Pallet_Assignment' VARIABLES
+    elif info['type'] == 'Pallet_Assignment':
+        assigned_truck = value
+        
+        # Rule: "Each cargo truck can receive one pallet."
+        for other_var, other_val in assignments.items():
+            if other_val is None or other_var == variable:
                 continue
 
-            if assignment_info['type'] == 'Arrival' and time < value:
-                valid_arrival = True
+            if 'Pallet_Assignment' in other_var and other_val == assigned_truck:
+                return False 
+            # Truck is already assigned to another pallet!
+    
+    # C3: CONSTRAINTS FOR 'Unload_Task' VARIABLES
+    elif info['type'] == 'Unload_Task':
+        assigned_forklift, unload_start_time = value
 
-            if assignment_info['type'] == 'Unload':
-                cargo_loaded += 1
-
-        if not valid_arrival or (info.get("plane") and cargo_loaded != problem_data['aircraft'][info['plane']]['Cargo']):
+        # Rule: Unloading must finish by the stop time.
+        if unload_start_time + PLANE_UNLOAD_DURATION > stop_time:
             return False
 
-    # Cannot load departed truck
-    # Cannot load loaded truck
-    # Cannot load with in-use forklift
-    # Cannot load if no cargo at hangar
-    if info['type'] == 'Load':
-        # If loading finishes after our time deadline
-        if value + TRUCK_LOAD_TIME > problem_data['Meta']['Stop Time']:
-            return False
-
-        valid_arrival = False
-        truck_hangar = None
-        vehicle_hangars = {}
-        hangar_cargo = {}
-
-        for assignment, time in assignments.items():
-            if time == -1:
+        # Rule: "No aircraft can unload before arriving at a hangar."
+        plane_arrival_var = f"Plane_Arrival_{info['plane']}"
+        plane_arrival_val = assignments.get(plane_arrival_var)
+        if not plane_arrival_val:
+            return False 
+        
+        # Trying to unload before the plane has arrived at the hangar.
+        hangar, plane_arrival_time = plane_arrival_val
+        if unload_start_time < plane_arrival_time:
+            return False 
+        
+        # Rule: A forklift can only do one thing at a time.
+        for other_var, other_val in assignments.items():
+            if other_val is None or other_var == variable:
                 continue
+            
+            if 'Unload_Task' in other_var:
+                other_forklift, other_start_time = other_val
+                if assigned_forklift == other_forklift:
+                    # Check for time overlap
+                    if max(unload_start_time, other_start_time) < min(unload_start_time + PLANE_UNLOAD_DURATION, other_start_time + PLANE_UNLOAD_DURATION):
+                        return False 
+            
+            if 'Load_Task' in other_var:
+                other_forklift, other_start_time = other_val
+                if assigned_forklift == other_forklift:
+                     if max(unload_start_time, other_start_time) < min(unload_start_time + PLANE_UNLOAD_DURATION, other_start_time + TRUCK_LOAD_DURATION):
+                        return False 
+                    
+    #CONSTRAINTS FOR 'Truck_Hangar_Arrival' VARIABLES
+    if info['type'] == 'Truck_Hangar':
+        assigned_hangar, arrival_time = value
+        departure_time = arrival_time + TRUCK_LOAD_DURATION
 
-            assignment_info = parse_variable(assignment, problem_data)
-
-            # Forklift constraints
-            if assignment_info.get('forklift') and info['forklift'] == assignment_info['forklift']:
-                fork_finished_use = time + (
-                    PLANE_UNLOAD_TIME if assignment_info['type'] == 'Unload' else TRUCK_LOAD_TIME
-                )
-
-                if value + TRUCK_LOAD_TIME > time and value < fork_finished_use:
-                    return False
-
-            # Record which hangar each vehicle occupies at arrival
-            if assignment_info['type'] == 'Arrival':
-                hangar = assignment_info.get('hangar')
-                vehicle = assignment_info.get('truck') or assignment_info.get('plane')
-
-                if hangar:
-                    vehicle_hangars[vehicle] = hangar
-                    if hangar not in hangar_cargo:
-                        hangar_cargo[hangar] = 0
-            # Adjust hangar cargo counts as loads/unloads occur
-            elif assignment_info['type'] == 'Load':
-                truck = assignment_info.get('truck')
-                hangar = vehicle_hangars.get(truck)
-
-                if hangar is not None:
-                    hangar_cargo[hangar] = hangar_cargo.get(hangar, 0) - 1
-            elif assignment_info['type'] == 'Unload':
-                plane = assignment_info.get('plane')
-                hangar = vehicle_hangars.get(plane)
-
-                if hangar is not None:
-                    hangar_cargo[hangar] = hangar_cargo.get(hangar, 0) + 1
-
-            # Truck-specific constraints
-            if same_vehicle(info, assignment_info):
-                if assignment_info['type'] in ['Departure', 'Load']:
-                    return False
-
-                if assignment_info['type'] == 'Arrival':
-                    if value < time:
+        # Rule: "Each hangar can accommodate one truck at any given time."
+        for other_var, other_val in assignments.items():
+            if other_val is None or other_var == variable:
+                continue
+            
+            if 'Truck_Hangar_Arrival' in other_var:
+                other_hangar, other_arrival = other_val
+                if assigned_hangar == other_hangar:
+                    other_departure = other_arrival + TRUCK_LOAD_DURATION
+                    # Check for time overlap
+                    if max(arrival_time, other_arrival) < min(departure_time, other_departure):
                         return False
 
-                    valid_arrival = True
-                    truck_hangar = assignment_info['hangar']
+    # C4: CONSTRAINTS FOR 'Load_Task' VARIABLES
+    elif info['type'] == 'Load_Task':
+        assigned_forklift, load_start_time = value
 
-        # Ensure truck has arrived and there’s at least one cargo unit available at its hangar
-        if not valid_arrival or hangar_cargo.get(truck_hangar, 0) < 1:
+        # Rule: Loading must finish by the stop time.
+        if load_start_time + TRUCK_LOAD_DURATION > stop_time:
             return False
         
-    if info['type'] == 'Unload':
-        # If unloading + loading is not feasible before time deadline
-        if value + PLANE_UNLOAD_TIME + TRUCK_LOAD_TIME > problem_data['Meta']['Stop Time']:
+        # Rule: Loading must happen after the pallet has been unloaded.
+        unload_task_var = f"Unload_Task_{info['pallet_id']}"
+        unload_task_val = assignments.get(unload_task_var)
+        if not unload_task_val:
+            return False 
+
+        forklift, unload_start_time = unload_task_val
+        unload_finish_time = unload_start_time + PLANE_UNLOAD_DURATION
+        # Trying to load before unloading is finished.
+        if load_start_time < unload_finish_time:
+            return False 
+
+        # Rule: "A forklift can only load if there is a truck waiting to be loaded"
+        # This means the truck must have arrived at the terminal.
+        pallet_assign_var = f"Pallet_Assignment_{info['pallet_id']}"
+        assigned_truck = assignments.get(pallet_assign_var)
+        if not assigned_truck:
+            return False 
+        
+        truck_arrival_time = problem_data['trucks'][assigned_truck]
+        if load_start_time < truck_arrival_time:
+            return False 
+        
+        # Find that truck's scheduled arrival at the hangar
+        truck_arrival_var = f"Truck_Hangar_Arrival_{assigned_truck}"
+        truck_arrival_val = assignments.get(truck_arrival_var)
+        if not truck_arrival_val: return False 
+
+        truck_hangar, truck_hangar_arrival_time = truck_arrival_val
+        
+        #Rule: Truck's arrival should be the same time as the load
+        if truck_hangar_arrival_time != load_start_time:
             return False
+        
+        # Rule: The truck must be at the same hangar where the pallet was unloaded.
+        plane_arrival_var = f"Plane_Arrival_{info['plane']}"
+        plane_hangar, _ = assignments.get(plane_arrival_var)
+        if truck_hangar != plane_hangar:
+            return False 
+
+        # Rule: A forklift can only do one thing at a time. 
+        for other_var, other_val in assignments.items():
+            if other_val is None or other_var == variable:
+                continue
+
+            if 'Unload_Task' in other_var:
+                other_forklift, other_start_time = other_val
+                if assigned_forklift == other_forklift:
+                    if max(load_start_time, other_start_time) < min(load_start_time + TRUCK_LOAD_DURATION, other_start_time + PLANE_UNLOAD_DURATION):
+                        return False
+            
+            if 'Load_Task' in other_var:
+                other_forklift, other_start_time = other_val
+                if assigned_forklift == other_forklift:
+                     if max(load_start_time, other_start_time) < min(load_start_time + TRUCK_LOAD_DURATION, other_start_time + TRUCK_LOAD_DURATION):
+                        return False
 
     return True
 
@@ -338,6 +425,93 @@ def meets_constraints(variable, value, assignments, problem_data):
     
 #     # If the loop finishes without finding a solution, return None.
 #     return None
+#grab a 
+
+def _time(val):
+    # val is ('HangarA', 830) or ('Fork1', 830) or just an int
+    return val[1] if isinstance(val, tuple) else val
+
+def check_constraint(xi, xv, xj, yv):
+    """Return True if xi=xv and xj=yv are consistent, using times."""
+    tx = _time(xv)
+    ty = _time(yv)
+
+    # Plane must arrive before unloading starts
+    if "Plane_Arrival" in xi and "Unload_Task" in xj:
+        return ty >= tx
+
+    # Unloading must finish before loading begins
+    if "Unload_Task" in xi and "Load_Task" in xj:
+        return ty >= tx + PLANE_UNLOAD_DURATION
+    
+    # Truck must arrive before loading begins
+    if "Truck_Hangar_Arrival" in xi and "Load_Task" in xj:
+        return ty >= tx
+
+    return True
+
+
+CONSTRAINT_RULES = {
+    "Load_Task": ["Truck_Hangar_Arrival"],     # Loading depends on truck arrival
+    "Unload_Task": ["Plane_Arrival"],          # Unloading depends on plane arrival
+    "Pallet_Assignment": ["Truck_Hangar_Arrival"],  # Which truck handles which pallet
+}
+
+
+def build_constraint_graph(variables, rules):
+    """Create a bidirectional constraint graph from naming patterns."""
+    graph = {}
+
+    for var1 in variables:
+        for var2 in variables:
+            if var1 == var2:
+                continue
+
+            for key, targets in rules.items():
+                if key in var1:
+                    for target in targets:
+                        if target in var2:
+                            graph.setdefault(var1, []).append(var2)
+                            graph.setdefault(var2, []).append(var1)
+
+    return graph
+
+def revise(domains, xi, xj, constraints, inferences):
+    """Revise Xi’s domain so all values are consistent with Xj."""
+    revised = False
+
+    for x in domains[xi][:]:  # iterate over a copy
+        if not any(check_constraint(xi, x, xj, y) for y in domains[xj]):
+            domains[xi].remove(x)
+            inferences.append((xi, x))
+            revised = True
+
+    return revised
+
+
+def ac3(domains, constraints):
+    """AC-3 algorithm: reduce domains using binary constraints."""
+    queue = [(xi, xj) for xi in domains for xj in constraints.get(xi, [])]
+    inferences = []
+
+    while queue:
+        xi, xj = queue.pop(0)
+        if revise(domains, xi, xj, constraints, inferences):
+            if not domains[xi]:
+                return None
+            for xk in constraints.get(xi, []):
+                if xk != xj:
+                    queue.append((xk, xi))
+
+    return inferences
+
+
+def restore_inferences(domains, inferences):
+    """Undo domain reductions when backtracking."""
+    for var, value in inferences:
+        if value not in domains[var]:
+            domains[var].append(value)
+
 
 def termination_condition(assignments, problem_data):
     # Terminate when all aircraft cargo loads have been completed
@@ -349,45 +523,35 @@ def termination_condition(assignments, problem_data):
     total_cargo = sum(data['Cargo'] for data in problem_data['aircraft'].values())
     return len(loaded) == total_cargo
 
-def solve_csp(assignments, variables, domains, problem_data, latest_time=None):
+def solve_csp(assignments, variables, domains, problem_data):
     # Initialize latest_time on the first call
-    if latest_time is None:
-        latest_time = problem_data['meta']['Start Time']
-
-    # Base case: stop if all cargo loads are done
-    if termination_condition(assignments, problem_data):
-        return assignments
-
+    
     # If no more variables, return None
     if not variables:
-        return None
+        return assignments
 
     variable = variables[0]
     domain = domains[variable]
+    # print(f"Jorkin it rn | Current Variable: {variable}        ", end="\r")
 
     # Iterate through the domain values in order
     for value in domain:
-        # Don't assign earlier times but allow for unassigned value.
-        if value != -1 and value < latest_time:
-            continue
-
         # Check constraints
         if meets_constraints(variable, value, assignments, problem_data):
-            new_latest_time = value if value != -1 and value > latest_time else latest_time
             assignments[variable] = value
-            result = solve_csp(assignments, variables[1:], domains, problem_data, new_latest_time)
+            inferences = ac3(domains, problem_data["constraints"])
 
-            if result is not None:
-                return result
+            if inferences is not None:
+                result = solve_csp(assignments, variables[1:], domains, problem_data)
+
+                if result is not None:
+                    return result
+
+                restore_inferences(domains, inferences)
 
             del assignments[variable]
 
     return None
-
-
-
-
-
 
 
 # The output formatter (ABSOLUTELY CHATTED)
@@ -479,9 +643,11 @@ if __name__ == "__main__":
     all_variables = define_variables(meta_data, aircraft_data, truck_data)
     domains = define_domains(meta_data, aircraft_data, truck_data)
 
+    problem_data["constraints"] = build_constraint_graph(all_variables, CONSTRAINT_RULES)
     solution = solve_csp({}, all_variables, domains, problem_data)
 
     if solution is not None:
+        print(solution)
         print("Solution found!")
         schedule_output = format_solution(solution, problem_data)
         try:
@@ -493,9 +659,9 @@ if __name__ == "__main__":
             sys.exit(1)
     else:
         print("No solution found for this problem.")
-        try:
-            with open(schedule_path, 'w') as f:
-                json.dump({}, f)
-        except IOError as e:
-            print(f"Error writing to file: {e}")
-            sys.exit(1)
+        # try:
+        #     with open(schedule_path, 'w') as f:
+        #         json.dump({}, f)
+        # except IOError as e:
+        #     print(f"Error writing to file: {e}")
+        #     sys.exit(1)

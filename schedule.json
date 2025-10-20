@@ -1,1 +1,16 @@
-{}
+{
+  "aircraft": {
+    "TwoCargo Aircraft": {},
+    "OneCargo Aircraft": {}
+  },
+  "trucks": {
+    "The Truck": {},
+    "The Other Truck": {},
+    "A Third Truck": {}
+  },
+  "forklifts": {
+    "Forklift1": [],
+    "Forklift2": [],
+    "Forklift 3": []
+  }
+}
