@@ -20,6 +20,19 @@ def load_data(meta_path, aircraft_path, trucks_path):
         truck_data = json.load(f)
     return meta_data, aircraft_data, truck_data
 
+#Time managemenr helpers 
+def increment_time(current):
+    hours = current // 100
+    minutes = current % 100
+
+    minutes += 5
+    if minutes >= 60:
+        hours += 1
+        minutes -= 60
+
+    return hours * 100 + minutes
+
+
 def define_variables(meta_data, aircraft_data, truck_data):
     #Defines variables based on key decisions for each plane and pallet.
     variables = []
@@ -55,10 +68,15 @@ def define_domains(meta_data, aircraft_data, truck_data):
     
     start_time = meta_data['Start Time']
     stop_time = meta_data['Stop Time']
-    time_schedule = list(range(start_time, stop_time + 1, TIME_STEP))
+    time_schedule = []
+    current_time = start_time
+    #account for time
+    while current_time <= stop_time:
+        time_schedule.append(current_time)
+        current_time = increment_time(current_time)
 
     hangars = meta_data['Hangars']
-    forklifts = meta_data['Forklift']
+    forklifts = meta_data['Forklifts']
     truck_names = list(truck_data.keys())
     pallets = []
     for plane, details in aircraft_data.items():
@@ -199,7 +217,6 @@ def meets_constraints(variable, value, assignments, problem_data):
     stop_time = problem_data['meta']['Stop Time']
 
     # C1: CONSTRAINTS FOR 'Plane_Arrival' VARIABLES
-    #--------------------------------------------------------------------------
     if info['type'] == 'Plane_Arrival':
         assigned_hangar, assigned_time = value
 
@@ -237,8 +254,6 @@ def meets_constraints(variable, value, assignments, problem_data):
                         return False # Hangar conflict!
 
     # CONSTRAINTS FOR 'Pallet_Assignment' VARIABLES
-    #--------------------------------------------------------------------------
-
     elif info['type'] == 'Pallet_Assignment':
         assigned_truck = value
         
@@ -252,8 +267,6 @@ def meets_constraints(variable, value, assignments, problem_data):
             # Truck is already assigned to another pallet!
     
     # C3: CONSTRAINTS FOR 'Unload_Task' VARIABLES
-    #--------------------------------------------------------------------------
-
     elif info['type'] == 'Unload_Task':
         assigned_forklift, unload_start_time = value
 
@@ -291,7 +304,6 @@ def meets_constraints(variable, value, assignments, problem_data):
                         return False 
                     
     #CONSTRAINTS FOR 'Truck_Hangar_Arrival' VARIABLES
-    #--------------------------------------------------------------------------
     if info['type'] == 'Truck_Hangar':
         assigned_hangar, arrival_time = value
         departure_time = arrival_time + TRUCK_LOAD_DURATION
@@ -310,7 +322,6 @@ def meets_constraints(variable, value, assignments, problem_data):
                         return False
 
     # C4: CONSTRAINTS FOR 'Load_Task' VARIABLES
-    # ----------------------------------------------------------------------------------
     elif info['type'] == 'Load_Task':
         assigned_forklift, load_start_time = value
 
@@ -339,6 +350,23 @@ def meets_constraints(variable, value, assignments, problem_data):
         
         truck_arrival_time = problem_data['trucks'][assigned_truck]
         if load_start_time < truck_arrival_time:
+            return False 
+        
+        # Find that truck's scheduled arrival at the hangar
+        truck_arrival_var = f"Truck_Hangar_Arrival_{assigned_truck}"
+        truck_arrival_val = assignments.get(truck_arrival_var)
+        if not truck_arrival_val: return False 
+
+        truck_hangar, truck_hangar_arrival_time = truck_arrival_val
+        
+        #Rule: Truck's arrival should be the same time as the load
+        if truck_hangar_arrival_time != load_start_time:
+            return False
+        
+        # Rule: The truck must be at the same hangar where the pallet was unloaded.
+        plane_arrival_var = f"Plane_Arrival_{info['plane']}"
+        plane_hangar, _ = assignments.get(plane_arrival_var)
+        if truck_hangar != plane_hangar:
             return False 
 
         # Rule: A forklift can only do one thing at a time. 
@@ -398,6 +426,48 @@ def meets_constraints(variable, value, assignments, problem_data):
     
 #     # If the loop finishes without finding a solution, return None.
 #     return None
+#grab a 
+
+# problem_data = {
+#     "constraints": {
+#         "X1": ["X2", "X3"],
+#         "X2": ["X1"],
+#         "check": lambda xi, xv, xj, yv: xv != yv  # example binary constraint
+#     }
+# }
+
+# def ac3(domains, constraints):
+#     """Primitive AC-3: reduces domains using binary constraints."""
+#     queue = [(xi, xj) for xi in domains for xj in constraints.get(xi, [])]
+#     inferences = []  # track all (var, value_removed) pairs
+    
+#     while queue:
+#         xi, xj = queue.pop(0)
+#         if revise(domains, xi, xj, constraints, inferences):
+#             if not domains[xi]:  # domain wiped out → failure
+#                 return None
+#             for xk in constraints.get(xi, []):
+#                 if xk != xj:
+#                     queue.append((xk, xi))
+#     return inferences  # return all pruned values
+
+
+# def revise(domains, xi, xj, constraints, inferences):
+#     revised = False
+#     for x in domains[xi][:]:  # iterate over a copy
+#         # if no value in Dj satisfies constraint between Xi=x and Xj=y
+#         if not any(constraints["check"](xi, x, xj, y) for y in domains[xj]):
+#             domains[xi].remove(x)
+#             inferences.append((xi, x))  # record what was pruned
+#             revised = True
+#     return revised
+
+
+# def restore_inferences(domains, inferences):
+#     """Undo domain reductions."""
+#     for var, value in inferences:
+#         if value not in domains[var]:
+#             domains[var].append(value)
 
 def termination_condition(assignments, problem_data):
     # Terminate when all aircraft cargo loads have been completed
@@ -409,36 +479,31 @@ def termination_condition(assignments, problem_data):
     total_cargo = sum(data['Cargo'] for data in problem_data['aircraft'].values())
     return len(loaded) == total_cargo
 
-def solve_csp(assignments, variables, domains, problem_data, latest_time=None):
+def solve_csp(assignments, variables, domains, problem_data):
     # Initialize latest_time on the first call
-    if latest_time is None:
-        latest_time = problem_data['meta']['Start Time']
-
-    # Base case: stop if all cargo loads are done
-    if termination_condition(assignments, problem_data):
-        return assignments
-
+    
     # If no more variables, return None
     if not variables:
-        return None
+        return assignments
 
     variable = variables[0]
     domain = domains[variable]
+    print(f"Jorkin it rn | Current Variable: {variable}        ", end="\r")
 
     # Iterate through the domain values in order
     for value in domain:
-        # Don't assign earlier times but allow for unassigned value.
-        if value != -1 and value < latest_time:
-            continue
-
         # Check constraints
         if meets_constraints(variable, value, assignments, problem_data):
-            new_latest_time = value if value != -1 and value > latest_time else latest_time
             assignments[variable] = value
-            result = solve_csp(assignments, variables[1:], domains, problem_data, new_latest_time)
+            # inferences = ac3(domains, problem_data["constraints"])
+
+            # if inferences is not None:
+            result = solve_csp(assignments, variables[1:], domains, problem_data)
 
             if result is not None:
                 return result
+
+                # restore_inferences(domains, inferences)
 
             del assignments[variable]
 
@@ -542,20 +607,21 @@ if __name__ == "__main__":
     solution = solve_csp({}, all_variables, domains, problem_data)
 
     if solution is not None:
+        print(solution)
         print("Solution found!")
-        schedule_output = format_solution(solution, problem_data)
-        try:
-            with open(schedule_path, 'w') as f:
-                json.dump(schedule_output, f, indent=2)
-            print(f"Schedule successfully written to {schedule_path}")
-        except IOError as e:
-            print(f"Error writing to file: {e}")
-            sys.exit(1)
+        # schedule_output = format_solution(solution, problem_data)
+        # try:
+        #     with open(schedule_path, 'w') as f:
+        #         json.dump(schedule_output, f, indent=2)
+        #     print(f"Schedule successfully written to {schedule_path}")
+        # except IOError as e:
+        #     print(f"Error writing to file: {e}")
+        #     sys.exit(1)
     else:
         print("No solution found for this problem.")
-        try:
-            with open(schedule_path, 'w') as f:
-                json.dump({}, f)
-        except IOError as e:
-            print(f"Error writing to file: {e}")
-            sys.exit(1)
+        # try:
+        #     with open(schedule_path, 'w') as f:
+        #         json.dump({}, f)
+        # except IOError as e:
+        #     print(f"Error writing to file: {e}")
+        #     sys.exit(1)

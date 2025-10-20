@@ -1,5 +1,14 @@
 {
-    "The Aircraft": {
-      "Time": 800, "Cargo": 2
-      }
+    "Virginia": {
+      "Time": 905, "Cargo": 1
+      },
+    "Maryland": {
+      "Time": 855, "Cargo": 2
+      },
+    "DC": {
+      "Time": 855, "Cargo": 1
+    },
+    "West Virginia": {
+      "Time": 945, "Cargo": 1
+    }
   }
