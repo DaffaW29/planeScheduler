@@ -1,0 +1,6 @@
+{
+    "Start Time": 850,
+    "Stop Time": 910,
+    "Hangars": ["First Hangar", "Second Hangar"],
+    "Forklifts": ["Forklift1", "Forklift2"]
+  }

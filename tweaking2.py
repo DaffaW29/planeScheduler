@@ -32,7 +32,6 @@ def increment_time(current):
 
     return hours * 100 + minutes
 
-
 def define_variables(meta_data, aircraft_data, truck_data):
     #Defines variables based on key decisions for each plane and pallet.
     variables = []
@@ -428,46 +427,91 @@ def meets_constraints(variable, value, assignments, problem_data):
 #     return None
 #grab a 
 
-# problem_data = {
-#     "constraints": {
-#         "X1": ["X2", "X3"],
-#         "X2": ["X1"],
-#         "check": lambda xi, xv, xj, yv: xv != yv  # example binary constraint
-#     }
-# }
+def _time(val):
+    # val is ('HangarA', 830) or ('Fork1', 830) or just an int
+    return val[1] if isinstance(val, tuple) else val
 
-# def ac3(domains, constraints):
-#     """Primitive AC-3: reduces domains using binary constraints."""
-#     queue = [(xi, xj) for xi in domains for xj in constraints.get(xi, [])]
-#     inferences = []  # track all (var, value_removed) pairs
+def check_constraint(xi, xv, xj, yv):
+    """Return True if xi=xv and xj=yv are consistent, using times."""
+    tx = _time(xv)
+    ty = _time(yv)
+
+    # Plane must arrive before unloading starts
+    if "Plane_Arrival" in xi and "Unload_Task" in xj:
+        return ty >= tx
+
+    # Unloading must finish before loading begins
+    if "Unload_Task" in xi and "Load_Task" in xj:
+        return ty >= tx + PLANE_UNLOAD_DURATION
     
-#     while queue:
-#         xi, xj = queue.pop(0)
-#         if revise(domains, xi, xj, constraints, inferences):
-#             if not domains[xi]:  # domain wiped out → failure
-#                 return None
-#             for xk in constraints.get(xi, []):
-#                 if xk != xj:
-#                     queue.append((xk, xi))
-#     return inferences  # return all pruned values
+    # Truck must arrive before loading begins
+    if "Truck_Hangar_Arrival" in xi and "Load_Task" in xj:
+        return ty >= tx
+
+    return True
 
 
-# def revise(domains, xi, xj, constraints, inferences):
-#     revised = False
-#     for x in domains[xi][:]:  # iterate over a copy
-#         # if no value in Dj satisfies constraint between Xi=x and Xj=y
-#         if not any(constraints["check"](xi, x, xj, y) for y in domains[xj]):
-#             domains[xi].remove(x)
-#             inferences.append((xi, x))  # record what was pruned
-#             revised = True
-#     return revised
+CONSTRAINT_RULES = {
+    "Load_Task": ["Truck_Hangar_Arrival"],     # Loading depends on truck arrival
+    "Unload_Task": ["Plane_Arrival"],          # Unloading depends on plane arrival
+    "Pallet_Assignment": ["Truck_Hangar_Arrival"],  # Which truck handles which pallet
+}
 
 
-# def restore_inferences(domains, inferences):
-#     """Undo domain reductions."""
-#     for var, value in inferences:
-#         if value not in domains[var]:
-#             domains[var].append(value)
+def build_constraint_graph(variables, rules):
+    """Create a bidirectional constraint graph from naming patterns."""
+    graph = {}
+
+    for var1 in variables:
+        for var2 in variables:
+            if var1 == var2:
+                continue
+
+            for key, targets in rules.items():
+                if key in var1:
+                    for target in targets:
+                        if target in var2:
+                            graph.setdefault(var1, []).append(var2)
+                            graph.setdefault(var2, []).append(var1)
+
+    return graph
+
+def revise(domains, xi, xj, constraints, inferences):
+    """Revise Xi’s domain so all values are consistent with Xj."""
+    revised = False
+
+    for x in domains[xi][:]:  # iterate over a copy
+        if not any(check_constraint(xi, x, xj, y) for y in domains[xj]):
+            domains[xi].remove(x)
+            inferences.append((xi, x))
+            revised = True
+
+    return revised
+
+
+def ac3(domains, constraints):
+    """AC-3 algorithm: reduce domains using binary constraints."""
+    queue = [(xi, xj) for xi in domains for xj in constraints.get(xi, [])]
+    inferences = []
+
+    while queue:
+        xi, xj = queue.pop(0)
+        if revise(domains, xi, xj, constraints, inferences):
+            if not domains[xi]:
+                return None
+            for xk in constraints.get(xi, []):
+                if xk != xj:
+                    queue.append((xk, xi))
+
+    return inferences
+
+
+def restore_inferences(domains, inferences):
+    """Undo domain reductions when backtracking."""
+    for var, value in inferences:
+        if value not in domains[var]:
+            domains[var].append(value)
+
 
 def termination_condition(assignments, problem_data):
     # Terminate when all aircraft cargo loads have been completed
@@ -488,31 +532,26 @@ def solve_csp(assignments, variables, domains, problem_data):
 
     variable = variables[0]
     domain = domains[variable]
-    print(f"Jorkin it rn | Current Variable: {variable}        ", end="\r")
+    # print(f"Jorkin it rn | Current Variable: {variable}        ", end="\r")
 
     # Iterate through the domain values in order
     for value in domain:
         # Check constraints
         if meets_constraints(variable, value, assignments, problem_data):
             assignments[variable] = value
-            # inferences = ac3(domains, problem_data["constraints"])
+            inferences = ac3(domains, problem_data["constraints"])
 
-            # if inferences is not None:
-            result = solve_csp(assignments, variables[1:], domains, problem_data)
+            if inferences is not None:
+                result = solve_csp(assignments, variables[1:], domains, problem_data)
 
-            if result is not None:
-                return result
+                if result is not None:
+                    return result
 
-                # restore_inferences(domains, inferences)
+                restore_inferences(domains, inferences)
 
             del assignments[variable]
 
     return None
-
-
-
-
-
 
 
 # The output formatter (ABSOLUTELY CHATTED)
@@ -604,6 +643,7 @@ if __name__ == "__main__":
     all_variables = define_variables(meta_data, aircraft_data, truck_data)
     domains = define_domains(meta_data, aircraft_data, truck_data)
 
+    problem_data["constraints"] = build_constraint_graph(all_variables, CONSTRAINT_RULES)
     solution = solve_csp({}, all_variables, domains, problem_data)
 
     if solution is not None:
