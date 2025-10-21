@@ -649,14 +649,14 @@ if __name__ == "__main__":
     if solution is not None:
         print(solution)
         print("Solution found!")
-        schedule_output = format_solution(solution, problem_data)
-        try:
-            with open(schedule_path, 'w') as f:
-                json.dump(schedule_output, f, indent=2)
-            print(f"Schedule successfully written to {schedule_path}")
-        except IOError as e:
-            print(f"Error writing to file: {e}")
-            sys.exit(1)
+        # schedule_output = format_solution(solution, problem_data)
+        # try:
+        #     with open(schedule_path, 'w') as f:
+        #         json.dump(schedule_output, f, indent=2)
+        #     print(f"Schedule successfully written to {schedule_path}")
+        # except IOError as e:
+        #     print(f"Error writing to file: {e}")
+        #     sys.exit(1)
     else:
         print("No solution found for this problem.")
         # try:
